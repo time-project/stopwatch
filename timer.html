@@ -1,0 +1,176 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Web Timer — iPhone style</title>
+<style>
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;background:#fff}
+  .time{font-size:48px;font-variant-numeric:tabular-nums;margin-bottom:12px}
+  .picker{display:flex;gap:8px;margin-bottom:20px}
+  select{font-size:20px;padding:8px;border-radius:8px;background:#f7f7f7;border:1px solid #ddd}
+  .controls{display:flex;gap:12px}
+  button{padding:10px 20px;border-radius:10px;border:none;background:#007aff;color:white;font-weight:600}
+  #canvasWrap{position:relative;width:240px;height:240px;margin-bottom:12px}
+  canvas{width:240px;height:240px}
+  /* New stop button style */
+  #stopAlarmBtn {
+    margin-top:12px;
+    padding:10px 20px;
+    border-radius:10px;
+    border:none;
+    background:#ff3b30;
+    color:white;
+    font-weight:600;
+    display:none; /* hidden until alarm triggers */
+  }
+</style>
+</head>
+<body>
+  <div id="canvasWrap"><canvas id="ring" width="240" height="240"></canvas></div>
+  <div class="time" id="timeLabel">00:00:00</div>
+  <div class="picker">
+    <select id="hours"></select>
+    <select id="minutes"></select>
+    <select id="seconds"></select>
+  </div>
+  <div class="controls">
+    <button id="start">Start</button>
+    <button id="pause" disabled>Pause</button>
+    <button id="reset" disabled>Reset</button>
+  </div>
+
+  <!-- Alarm sound -->
+  <audio id="alarmSound" src="alarm.mp3" preload="auto"></audio>
+  <!-- Stop button (only shows when alarm goes off) -->
+  <button id="stopAlarmBtn">Stop Alarm</button>
+
+<script>
+  // populate selects
+  const hrs = document.getElementById('hours'), mins = document.getElementById('minutes'), secs = document.getElementById('seconds')
+  for(let i=0;i<24;i++){ hrs.add(new Option(String(i).padStart(2,'0'),i)) }
+  for(let i=0;i<60;i++){ mins.add(new Option(String(i).padStart(2,'0'),i)); secs.add(new Option(String(i).padStart(2,'0'),i)) }
+
+  const timeLabel = document.getElementById('timeLabel')
+  const startBtn = document.getElementById('start'), pauseBtn=document.getElementById('pause'), resetBtn=document.getElementById('reset')
+  const alarm = document.getElementById('alarmSound')
+  const stopBtn = document.getElementById('stopAlarmBtn')
+
+  let total=0, remaining=0, interval=null, endTS=null, notifTimer=null
+  let wakeLock=null
+
+  function formatTime(s){ const h=Math.floor(s/3600), m=Math.floor((s%3600)/60), sec=s%60; return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}` }
+
+  function drawRing(progress){
+    const c = document.getElementById('ring'), ctx=c.getContext('2d'), w=c.width, h=c.height
+    ctx.clearRect(0,0,w,h)
+    const cx=w/2, cy=h/2, r=(w/2)-16
+    ctx.beginPath(); ctx.arc(cx,cy,r,-Math.PI/2,Math.PI*1.5); ctx.lineWidth=12; ctx.strokeStyle='#eee'; ctx.stroke()
+    ctx.beginPath(); ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+(Math.PI*2*progress)); ctx.lineWidth=12; ctx.strokeStyle='#007aff'; ctx.lineCap='round'; ctx.stroke()
+  }
+
+  drawRing(0)
+
+  async function requestWakeLock(){
+    try { wakeLock = await navigator.wakeLock.request('screen') } catch(e) {}
+  }
+  function releaseWakeLock(){ if(wakeLock){ wakeLock.release(); wakeLock=null } }
+
+  function startTimer(){
+    if(total===0){
+      const h=+hrs.value, m=+mins.value, s=+secs.value
+      total = h*3600 + m*60 + s
+      remaining = total
+      if(total===0) return
+    }
+    endTS = Date.now() + remaining*1000
+    interval = setInterval(tick, 250)
+    scheduleNotification(remaining)
+    requestWakeLock()
+    startBtn.disabled=true; pauseBtn.disabled=false; resetBtn.disabled=false
+  }
+
+  function tick(){
+    remaining = Math.max(0, Math.round((endTS - Date.now())/1000))
+    timeLabel.textContent = formatTime(remaining)
+    drawRing(1-(remaining/total||0))
+    if(remaining<=0) complete()
+  }
+
+  function pauseTimer(){
+    if(interval){ clearInterval(interval); interval=null
+      if(notifTimer){ clearTimeout(notifTimer); notifTimer=null }
+      pauseBtn.textContent='Resume'
+      releaseWakeLock()
+    } else {
+      endTS = Date.now() + remaining*1000
+      interval = setInterval(tick,250)
+      scheduleNotification(remaining)
+      pauseBtn.textContent='Pause'
+      requestWakeLock()
+    }
+  }
+
+  function resetTimer(){
+    clearInterval(interval); interval=null; if(notifTimer){ clearTimeout(notifTimer); notifTimer=null }
+    total=0; remaining=0; endTS=null
+    drawRing(0); timeLabel.textContent='00:00:00'
+    startBtn.disabled=false; pauseBtn.disabled=true; resetBtn.disabled=true; pauseBtn.textContent='Pause'
+    releaseWakeLock()
+  }
+
+  function complete(){
+    clearInterval(interval); interval=null
+    drawRing(1); timeLabel.textContent='00:00:00'
+    startBtn.disabled=false; pauseBtn.disabled=true; resetBtn.disabled=true
+    releaseWakeLock()
+
+    // Loop alarm until stopped
+    alarm.loop = true
+    alarm.play().catch(()=>{})
+    navigator.vibrate && navigator.vibrate([200,100,200,100,200])
+
+    // Show Stop button
+    stopBtn.style.display = 'inline-block'
+  }
+
+  stopBtn.addEventListener('click', ()=>{
+    alarm.pause(); alarm.currentTime=0; alarm.loop=false
+    stopBtn.style.display='none'
+  })
+
+  async function scheduleNotification(sec){
+    if('Notification' in window){
+      if(Notification.permission==='default'){ await Notification.requestPermission() }
+      if(Notification.permission==='granted'){
+        if(notifTimer) clearTimeout(notifTimer)
+        notifTimer = setTimeout(()=>{
+          new Notification('Timer finished',{body:'Your timer has ended.'})
+          if(document.visibilityState==='visible'){ alarm.play().catch(()=>{}) }
+        },sec*1000)
+      }
+    }
+  }
+
+  startBtn.addEventListener('click', startTimer)
+  pauseBtn.addEventListener('click', pauseTimer)
+  resetBtn.addEventListener('click', resetTimer)
+
+  window.addEventListener('beforeunload', ()=> {
+    if(total>0) localStorage.setItem('timer', JSON.stringify({ total, remaining, endTS }))
+    else localStorage.removeItem('timer')
+  })
+  window.addEventListener('load', ()=>{
+    const s=localStorage.getItem('timer')
+    if(s){
+      const obj=JSON.parse(s)
+      total=obj.total||0; remaining=obj.remaining||0; endTS=obj.endTS||null
+      if(endTS && Date.now()<endTS){
+        remaining=Math.round((endTS-Date.now())/1000)
+        startTimer()
+      } else { total=0; remaining=0 }
+    }
+  })
+</script>
+</body>
+</html>
